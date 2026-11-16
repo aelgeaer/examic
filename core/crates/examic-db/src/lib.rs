@@ -1,23 +1,17 @@
-//! The library database: which recordings exist, their bookmarks and where
-//! speech occurs in them.
+//! The library database: which recordings exist, their bookmarks, where
+//! speech occurs in them, their transcripts and the photos taken during them.
 //!
-//! The whole file is encrypted by SQLCipher (AES-256 with a per-page HMAC)
-//! under a raw 256-bit key. A raw key skips SQLCipher's password stretching,
-//! which would cost a quarter of a second on every app start to protect a key
-//! that is already uniformly random.
+//! A plain SQLite file in the app's private storage.
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-// Not called from Rust: naming the crate is what makes the linker pick up the
-// SQLCipher library it builds, and the system libraries that needs.
-use examic_sqlcipher as _;
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use zeroize::Zeroizing;
 
 /// One entry per schema version; entry `n` upgrades version `n` to `n + 1`.
 /// Shipped entries are never edited, only appended to.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE recordings (
         id            TEXT PRIMARY KEY,
         title         TEXT NOT NULL,
@@ -44,16 +38,37 @@ const MIGRATIONS: &[&str] = &["
         end_ms       INTEGER NOT NULL,
         PRIMARY KEY (recording_id, start_ms)
     ) STRICT, WITHOUT ROWID;
-"];
+",
+    "
+    ALTER TABLE recordings ADD COLUMN transcribe_mode TEXT NOT NULL DEFAULT 'OFF'
+        CHECK (transcribe_mode IN ('OFF', 'LIVE', 'AFTER'));
+    ALTER TABLE recordings ADD COLUMN translate INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE recordings ADD COLUMN transcript_status TEXT NOT NULL DEFAULT 'NONE'
+        CHECK (transcript_status IN ('NONE', 'PENDING', 'RUNNING', 'DONE', 'FAILED'));
+
+    CREATE TABLE transcript_segments (
+        recording_id TEXT NOT NULL REFERENCES recordings (id) ON DELETE CASCADE,
+        start_ms     INTEGER NOT NULL,
+        end_ms       INTEGER NOT NULL,
+        text_ru      TEXT NOT NULL,
+        text_en      TEXT,
+        PRIMARY KEY (recording_id, start_ms)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE photos (
+        id           INTEGER PRIMARY KEY,
+        recording_id TEXT NOT NULL REFERENCES recordings (id) ON DELETE CASCADE,
+        timestamp_ms INTEGER NOT NULL,
+        file         TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX photos_by_recording ON photos (recording_id, timestamp_ms);
+",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("the database cannot be opened with this key")]
-    WrongKey,
-    #[error("the SQLite library in this build cannot encrypt")]
-    EncryptionUnavailable,
     #[error("database was written by a newer version of the app (schema {0})")]
     TooNew(i64),
     #[error("recording not found")]
@@ -89,6 +104,69 @@ impl RecordingStatus {
     }
 }
 
+/// When a recording is transcribed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscribeMode {
+    Off,
+    /// While recording, one speech segment at a time.
+    Live,
+    /// In one pass once the recording has stopped.
+    After,
+}
+
+impl TranscribeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::Live => "LIVE",
+            Self::After => "AFTER",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "LIVE" => Self::Live,
+            "AFTER" => Self::After,
+            _ => Self::Off,
+        }
+    }
+}
+
+/// Where a recording's transcript stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptStatus {
+    /// Never transcribed.
+    None,
+    /// Queued behind other work.
+    Pending,
+    Running,
+    Done,
+    /// Stopped by an error or by the app dying; can be run again.
+    Failed,
+}
+
+impl TranscriptStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "NONE",
+            Self::Pending => "PENDING",
+            Self::Running => "RUNNING",
+            Self::Done => "DONE",
+            Self::Failed => "FAILED",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "PENDING" => Self::Pending,
+            "RUNNING" => Self::Running,
+            "DONE" => Self::Done,
+            "FAILED" => Self::Failed,
+            _ => Self::None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recording {
     pub id: String,
@@ -102,6 +180,11 @@ pub struct Recording {
     pub size_bytes: i64,
     pub status: RecordingStatus,
     pub bookmark_count: u32,
+    pub transcribe_mode: TranscribeMode,
+    /// Whether transcribed text is also translated into English.
+    pub translate: bool,
+    pub transcript_status: TranscriptStatus,
+    pub photo_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,9 +195,29 @@ pub struct Bookmark {
     pub note: Option<String>,
 }
 
+/// One stretch of transcribed speech.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptSegment {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text_ru: String,
+    pub text_en: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Photo {
+    pub id: i64,
+    pub recording_id: String,
+    pub timestamp_ms: i64,
+    /// Path relative to the app's data directory.
+    pub file: String,
+}
+
 const RECORDING_COLUMNS: &str = "
     id, title, created_at_ms, duration_ms, sample_rate, audio_file, size_bytes, status,
-    (SELECT COUNT(*) FROM bookmarks WHERE recording_id = recordings.id)";
+    (SELECT COUNT(*) FROM bookmarks WHERE recording_id = recordings.id),
+    transcribe_mode, translate, transcript_status,
+    (SELECT COUNT(*) FROM photos WHERE recording_id = recordings.id)";
 
 fn recording_from_row(row: &Row) -> rusqlite::Result<Recording> {
     Ok(Recording {
@@ -127,6 +230,10 @@ fn recording_from_row(row: &Row) -> rusqlite::Result<Recording> {
         size_bytes: row.get(6)?,
         status: RecordingStatus::parse(&row.get::<_, String>(7)?),
         bookmark_count: row.get(8)?,
+        transcribe_mode: TranscribeMode::parse(&row.get::<_, String>(9)?),
+        translate: row.get(10)?,
+        transcript_status: TranscriptStatus::parse(&row.get::<_, String>(11)?),
+        photo_count: row.get(12)?,
     })
 }
 
@@ -135,30 +242,17 @@ pub struct Database {
 }
 
 impl Database {
-    /// Opens (creating if needed) the database at `path`, encrypted with `key`.
-    pub fn open(path: &Path, key: &[u8; 32]) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        apply_key(&conn, key)?;
-        Self::initialise(conn)
+    /// Opens (creating if needed) the database at `path`.
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::initialise(Connection::open(path)?)
     }
 
-    /// A private, unencrypted in-memory database, for tests.
+    /// A private in-memory database, for tests.
     pub fn open_in_memory() -> Result<Self> {
         Self::initialise(Connection::open_in_memory()?)
     }
 
     fn initialise(mut conn: Connection) -> Result<Self> {
-        // The first real read is where a wrong key shows up.
-        conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |_| Ok(()))
-            .map_err(|e| match e {
-                rusqlite::Error::SqliteFailure(f, _)
-                    if f.code == rusqlite::ErrorCode::NotADatabase =>
-                {
-                    DbError::WrongKey
-                }
-                other => DbError::Sqlite(other),
-            })?;
-
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -175,6 +269,7 @@ impl Database {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_recording(
         &self,
         id: &str,
@@ -182,11 +277,28 @@ impl Database {
         created_at_ms: i64,
         sample_rate: u32,
         audio_file: &str,
+        transcribe_mode: TranscribeMode,
+        translate: bool,
     ) -> Result<()> {
+        let transcript_status = match transcribe_mode {
+            TranscribeMode::Off => TranscriptStatus::None,
+            TranscribeMode::Live => TranscriptStatus::Running,
+            TranscribeMode::After => TranscriptStatus::Pending,
+        };
         self.conn().execute(
-            "INSERT INTO recordings (id, title, created_at_ms, sample_rate, audio_file, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'RECORDING')",
-            params![id, title, created_at_ms, sample_rate, audio_file],
+            "INSERT INTO recordings (id, title, created_at_ms, sample_rate, audio_file, status,
+                                     transcribe_mode, translate, transcript_status)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'RECORDING', ?6, ?7, ?8)",
+            params![
+                id,
+                title,
+                created_at_ms,
+                sample_rate,
+                audio_file,
+                transcribe_mode.as_str(),
+                translate,
+                transcript_status.as_str()
+            ],
         )?;
         Ok(())
     }
@@ -288,14 +400,7 @@ impl Database {
             "INSERT INTO bookmarks (recording_id, timestamp_ms, note) VALUES (?1, ?2, ?3)",
             params![recording_id, timestamp_ms, note],
         )
-        .map_err(|e| match e {
-            rusqlite::Error::SqliteFailure(f, _)
-                if f.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                DbError::NotFound
-            }
-            other => DbError::Sqlite(other),
-        })?;
+        .map_err(not_found_on_constraint)?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -333,26 +438,163 @@ impl Database {
         let rows = stmt.query_map([recording_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    pub fn set_transcript_status(&self, id: &str, status: TranscriptStatus) -> Result<()> {
+        let updated = self.conn().execute(
+            "UPDATE recordings SET transcript_status = ?2 WHERE id = ?1",
+            params![id, status.as_str()],
+        )?;
+        if updated == 0 {
+            return Err(DbError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Sets the translation option and returns the recording's new state.
+    pub fn set_translate(&self, id: &str, translate: bool) -> Result<()> {
+        let updated = self.conn().execute(
+            "UPDATE recordings SET translate = ?2 WHERE id = ?1",
+            params![id, translate],
+        )?;
+        if updated == 0 {
+            return Err(DbError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Transcription work that a previous run left unfinished becomes
+    /// `Failed`, so it can be started again. Returns how many were reset.
+    pub fn fail_unfinished_transcripts(&self) -> Result<usize> {
+        Ok(self.conn().execute(
+            "UPDATE recordings SET transcript_status = 'FAILED'
+             WHERE transcript_status IN ('PENDING', 'RUNNING') AND status != 'RECORDING'",
+            [],
+        )?)
+    }
+
+    /// Removes a recording's transcript before it is transcribed again.
+    pub fn clear_transcript(&self, recording_id: &str) -> Result<()> {
+        self.conn().execute(
+            "DELETE FROM transcript_segments WHERE recording_id = ?1",
+            [recording_id],
+        )?;
+        Ok(())
+    }
+
+    /// Stores segments, replacing any that start at the same moment.
+    pub fn add_transcript_segments(
+        &self,
+        recording_id: &str,
+        segments: &[TranscriptSegment],
+    ) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut insert = tx.prepare(
+                "INSERT OR REPLACE INTO transcript_segments
+                     (recording_id, start_ms, end_ms, text_ru, text_en)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for s in segments {
+                insert
+                    .execute(params![
+                        recording_id,
+                        s.start_ms,
+                        s.end_ms,
+                        s.text_ru,
+                        s.text_en
+                    ])
+                    .map_err(not_found_on_constraint)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_segment_translation(
+        &self,
+        recording_id: &str,
+        start_ms: i64,
+        text_en: Option<&str>,
+    ) -> Result<()> {
+        self.conn().execute(
+            "UPDATE transcript_segments SET text_en = ?3 WHERE recording_id = ?1 AND start_ms = ?2",
+            params![recording_id, start_ms, text_en],
+        )?;
+        Ok(())
+    }
+
+    /// A recording's transcript in timeline order.
+    pub fn transcript(&self, recording_id: &str) -> Result<Vec<TranscriptSegment>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT start_ms, end_ms, text_ru, text_en FROM transcript_segments
+             WHERE recording_id = ?1 ORDER BY start_ms",
+        )?;
+        let rows = stmt.query_map([recording_id], |row| {
+            Ok(TranscriptSegment {
+                start_ms: row.get(0)?,
+                end_ms: row.get(1)?,
+                text_ru: row.get(2)?,
+                text_en: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn add_photo(&self, recording_id: &str, timestamp_ms: i64, file: &str) -> Result<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO photos (recording_id, timestamp_ms, file) VALUES (?1, ?2, ?3)",
+            params![recording_id, timestamp_ms, file],
+        )
+        .map_err(not_found_on_constraint)?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Photos of a recording in timeline order.
+    pub fn photos(&self, recording_id: &str) -> Result<Vec<Photo>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, recording_id, timestamp_ms, file FROM photos
+             WHERE recording_id = ?1 ORDER BY timestamp_ms, id",
+        )?;
+        let rows = stmt.query_map([recording_id], photo_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Deletes a photo and returns it, so the caller can remove its file.
+    pub fn delete_photo(&self, id: i64) -> Result<Photo> {
+        self.conn()
+            .query_row(
+                "DELETE FROM photos WHERE id = ?1 RETURNING id, recording_id, timestamp_ms, file",
+                [id],
+                photo_from_row,
+            )
+            .optional()?
+            .ok_or(DbError::NotFound)
+    }
 }
 
-fn apply_key(conn: &Connection, key: &[u8; 32]) -> Result<()> {
-    let mut pragma = Zeroizing::new(String::with_capacity(80));
-    pragma.push_str("PRAGMA key = \"x'");
-    for byte in key {
-        pragma.push_str(&format!("{byte:02x}"));
-    }
-    pragma.push_str("'\"");
-    conn.execute_batch(&pragma)?;
+fn photo_from_row(row: &Row) -> rusqlite::Result<Photo> {
+    Ok(Photo {
+        id: row.get(0)?,
+        recording_id: row.get(1)?,
+        timestamp_ms: row.get(2)?,
+        file: row.get(3)?,
+    })
+}
 
-    // Plain SQLite silently ignores `PRAGMA key`. Refuse to continue unless
-    // the library really is SQLCipher, or the file would be written in clear.
-    let cipher_version: Option<String> = conn
-        .query_row("PRAGMA cipher_version", [], |row| row.get(0))
-        .optional()?;
-    if cipher_version.is_none() {
-        return Err(DbError::EncryptionUnavailable);
+/// A foreign-key violation on insert means the recording does not exist.
+fn not_found_on_constraint(e: rusqlite::Error) -> DbError {
+    match e {
+        rusqlite::Error::SqliteFailure(f, _)
+            if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            DbError::NotFound
+        }
+        other => DbError::Sqlite(other),
     }
-    Ok(())
 }
 
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -383,7 +625,9 @@ mod tests {
             &format!("Title {id}"),
             created_at_ms,
             48_000,
-            &format!("{id}.exa"),
+            &format!("{id}.opus"),
+            TranscribeMode::Off,
+            false,
         )
         .unwrap();
     }
@@ -470,7 +714,7 @@ mod tests {
         db.finish_recording("a", RecordingStatus::Ready, 1, 1, &[(0, 1)])
             .unwrap();
 
-        assert_eq!(db.delete_recording("a").unwrap(), "a.exa");
+        assert_eq!(db.delete_recording("a").unwrap(), "a.opus");
         assert!(matches!(db.recording("a"), Err(DbError::NotFound)));
         assert!(db.bookmarks("a").unwrap().is_empty());
         assert!(db.speech_intervals("a").unwrap().is_empty());
@@ -504,35 +748,8 @@ mod tests {
         let rec = db.recording("a").unwrap();
         assert_eq!(
             (rec.title.as_str(), rec.audio_file.as_str()),
-            ("Board meeting", "a.exa")
+            ("Board meeting", "a.opus")
         );
-    }
-
-    #[test]
-    fn the_file_on_disk_is_encrypted_and_needs_its_key() {
-        let dir = std::env::temp_dir().join(format!("examic-db-key-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("keyed.db");
-        let _ = std::fs::remove_file(&path);
-        {
-            let db = Database::open(&path, &[1; 32]).unwrap();
-            db.create_recording("a", "Quarterly budget review", 1, 48_000, "a.exa")
-                .unwrap();
-        }
-        let raw = std::fs::read(&path).unwrap();
-        assert!(!raw.starts_with(b"SQLite format 3"));
-        assert!(
-            !raw.windows(6).any(|w| w == b"budget"),
-            "title stored in clear"
-        );
-        assert!(matches!(
-            Database::open(&path, &[2; 32]),
-            Err(DbError::WrongKey)
-        ));
-        let reopened = Database::open(&path, &[1; 32]).unwrap();
-        assert_eq!(reopened.recordings().unwrap().len(), 1);
-        drop(reopened);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -542,13 +759,97 @@ mod tests {
         let path = dir.join("reopen.db");
         let _ = std::fs::remove_file(&path);
         {
-            let db = Database::open(&path, &[1; 32]).unwrap();
+            let db = Database::open(&path).unwrap();
             add(&db, "a", 1_000);
         }
-        let db = Database::open(&path, &[1; 32]).unwrap();
+        let db = Database::open(&path).unwrap();
         assert_eq!(db.recordings().unwrap().len(), 1);
         drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn transcription_options_start_the_right_status() {
+        let db = db();
+        let create = |id: &str, mode| {
+            db.create_recording(id, id, 1, 48_000, "x.opus", mode, true)
+                .unwrap();
+            db.recording(id).unwrap()
+        };
+        let off = create("off", TranscribeMode::Off);
+        let live = create("live", TranscribeMode::Live);
+        let after = create("after", TranscribeMode::After);
+        assert_eq!(off.transcript_status, TranscriptStatus::None);
+        assert_eq!(live.transcript_status, TranscriptStatus::Running);
+        assert_eq!(after.transcript_status, TranscriptStatus::Pending);
+        assert_eq!(after.transcribe_mode, TranscribeMode::After);
+        assert!(after.translate);
+
+        // A crash leaves live/after work unfinished; once the recordings are
+        // no longer being captured, it is marked failed so it can be retried.
+        for id in ["live", "after"] {
+            db.finish_recording(id, RecordingStatus::Recovered, 1, 1, &[])
+                .unwrap();
+        }
+        assert_eq!(db.fail_unfinished_transcripts().unwrap(), 2);
+        assert_eq!(
+            db.recording("live").unwrap().transcript_status,
+            TranscriptStatus::Failed
+        );
+        assert_eq!(
+            db.recording("off").unwrap().transcript_status,
+            TranscriptStatus::None
+        );
+    }
+
+    #[test]
+    fn transcript_segments_are_ordered_replaced_and_translated() {
+        let db = db();
+        add(&db, "a", 1);
+        let seg = |start_ms, text: &str| TranscriptSegment {
+            start_ms,
+            end_ms: start_ms + 500,
+            text_ru: text.into(),
+            text_en: None,
+        };
+        db.add_transcript_segments("a", &[seg(2000, "вторая"), seg(0, "первая")])
+            .unwrap();
+        db.add_transcript_segments("a", &[seg(2000, "вторая, исправленная")])
+            .unwrap();
+        db.set_segment_translation("a", 0, Some("first")).unwrap();
+        let t = db.transcript("a").unwrap();
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].text_en.as_deref(), Some("first"));
+        assert_eq!(t[1].text_ru, "вторая, исправленная");
+        assert!(matches!(
+            db.add_transcript_segments("missing", &[seg(0, "x")]),
+            Err(DbError::NotFound)
+        ));
+
+        db.clear_transcript("a").unwrap();
+        assert!(db.transcript("a").unwrap().is_empty());
+    }
+
+    #[test]
+    fn photos_are_ordered_counted_and_go_with_their_recording() {
+        let db = db();
+        add(&db, "a", 1);
+        let late = db.add_photo("a", 9_000, "photos/a/2.jpg").unwrap();
+        let early = db.add_photo("a", 1_000, "photos/a/1.jpg").unwrap();
+        let photos = db.photos("a").unwrap();
+        assert_eq!(
+            photos.iter().map(|p| p.id).collect::<Vec<_>>(),
+            [early, late]
+        );
+        assert_eq!(db.recording("a").unwrap().photo_count, 2);
+        assert_eq!(db.delete_photo(early).unwrap().file, "photos/a/1.jpg");
+        assert!(matches!(db.delete_photo(early), Err(DbError::NotFound)));
+        assert!(matches!(
+            db.add_photo("missing", 0, "x.jpg"),
+            Err(DbError::NotFound)
+        ));
+        db.delete_recording("a").unwrap();
+        assert!(db.photos("a").unwrap().is_empty());
     }
 
     #[test]

@@ -19,3 +19,6 @@ build/
 *.jks
 *.keystore
 keystore.properties
+
+# Downloaded models (android/models.properties pins them)
+/android/.model-cache/

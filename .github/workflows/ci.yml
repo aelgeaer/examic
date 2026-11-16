@@ -20,7 +20,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
-      - run: cargo clippy --workspace --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The native backends (libopus, transcribe.cpp, ONNX Runtime bindings)
+      # are only compiled into the Android library; lint them here too.
+      - run: cargo clippy -p examic-ffi -p examic-asr -p examic-mt --features examic-ffi/native --all-targets --locked -- -D warnings
 
   android:
     name: Android build
@@ -43,7 +46,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Build and unit-test
         working-directory: android
-        run: ./gradlew assembleDebug testDebugUnitTest
+        # The models (310 MB) are left out of CI debug builds; release.yml bundles them.
+        run: ./gradlew -Pexamic.bundleModels=false assembleDebug testDebugUnitTest
+      - name: The app must not be able to reach the network
+        run: |
+          aapt2="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/aapt2"
+          if "$aapt2" dump badging android/app/build/outputs/apk/debug/app-debug.apk | grep -q "android.permission.INTERNET"; then
+            echo "::error::a dependency added the INTERNET permission; remove it in AndroidManifest.xml"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: examic-debug-apk

@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -58,7 +60,11 @@ import io.github.aelgeaer.examic.audio.Recorder
 import io.github.aelgeaer.examic.audio.RecorderStatus
 import io.github.aelgeaer.examic.core.Recording
 import io.github.aelgeaer.examic.core.RecordingStatus
+import io.github.aelgeaer.examic.core.TranscriptStatus
+import io.github.aelgeaer.examic.examicApp
+import io.github.aelgeaer.examic.settings.RecordingOptions
 import io.github.aelgeaer.examic.ui.attempt
+import io.github.aelgeaer.examic.ui.common.ExportDialog
 import io.github.aelgeaer.examic.ui.formatDateTime
 import io.github.aelgeaer.examic.ui.formatDuration
 import io.github.aelgeaer.examic.withEngine
@@ -74,7 +80,7 @@ private sealed interface LibraryState {
 @Composable
 fun LibraryScreen(
     snackbar: SnackbarHostState,
-    onRecord: (title: String) -> Unit,
+    onRecord: (title: String, options: RecordingOptions) -> Unit,
     onOpenRecorder: () -> Unit,
     onOpenRecording: (id: String) -> Unit,
 ) {
@@ -85,12 +91,32 @@ fun LibraryScreen(
     var reload by remember { mutableIntStateOf(0) }
     var renaming by remember { mutableStateOf<Recording?>(null) }
     var deleting by remember { mutableStateOf<Recording?>(null) }
+    var exporting by remember { mutableStateOf<Recording?>(null) }
+    var choosingOptions by remember { mutableStateOf(false) }
+    var showingLicenses by remember { mutableStateOf(false) }
+    var appMenuOpen by remember { mutableStateOf(false) }
+    var pendingOptions by remember { mutableStateOf(RecordingOptions.load(context)) }
+    val models by context.examicApp.models.state.collectAsStateWithLifecycle()
+    // Transcription progress, kept live from the engine's events.
+    var progress by remember { mutableStateOf(emptyMap<String, Float>()) }
 
     // Reloads after an edit and whenever a recording starts or finishes.
     LaunchedEffect(reload, recorderStatus == RecorderStatus.Idle) {
         state = attempt({ state = LibraryState.Failed(it) }) {
             LibraryState.Loaded(context.withEngine { it.recordings() })
         } ?: return@LaunchedEffect
+    }
+
+    LaunchedEffect(Unit) {
+        context.examicApp.transcriptEvents.collect { event ->
+            progress = if (event.progress != null && event.status == TranscriptStatus.RUNNING) {
+                progress + (event.recordingId to event.progress!!)
+            } else {
+                progress - event.recordingId
+            }
+            // Only status changes alter the list; segment updates do not.
+            if (event.progress == null || event.status != TranscriptStatus.RUNNING) reload++
+        }
     }
 
     fun showError(message: String) {
@@ -105,13 +131,15 @@ fun LibraryScreen(
         // Notifications are optional: recording works without the status
         // notification being visible. The microphone is not.
         if (granted[Manifest.permission.RECORD_AUDIO] == true) {
-            onRecord(defaultTitle)
+            onRecord(defaultTitle, pendingOptions)
         } else {
             scope.launch { snackbar.showSnackbar(microphoneDenied) }
         }
     }
 
-    fun record() {
+    fun record(options: RecordingOptions) {
+        pendingOptions = options
+        RecordingOptions.save(context, options)
         val needed = buildList {
             add(Manifest.permission.RECORD_AUDIO)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
@@ -119,17 +147,34 @@ fun LibraryScreen(
         if (Manifest.permission.RECORD_AUDIO in needed) {
             permissions.launch(needed.toTypedArray())
         } else {
-            onRecord(defaultTitle)
+            onRecord(defaultTitle, options)
         }
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) },
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.app_name)) },
+                actions = {
+                    Box {
+                        IconButton(onClick = { appMenuOpen = true }) {
+                            Icon(painterResource(R.drawable.ic_more), stringResource(R.string.more_options))
+                        }
+                        DropdownMenu(expanded = appMenuOpen, onDismissRequest = { appMenuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.licenses)) },
+                                onClick = { appMenuOpen = false; showingLicenses = true },
+                            )
+                        }
+                    }
+                },
+            )
+        },
         snackbarHost = { SnackbarHost(snackbar) },
         floatingActionButton = {
             if (recorderStatus == RecorderStatus.Idle && state is LibraryState.Loaded) {
                 ExtendedFloatingActionButton(
-                    onClick = ::record,
+                    onClick = { choosingOptions = true },
                     icon = { Icon(painterResource(R.drawable.ic_mic), contentDescription = null) },
                     text = { Text(stringResource(R.string.record)) },
                 )
@@ -167,8 +212,10 @@ fun LibraryScreen(
                     items(finished, key = { it.id }) { recording ->
                         RecordingRow(
                             recording = recording,
+                            progress = progress[recording.id],
                             onOpen = { onOpenRecording(recording.id) },
                             onRename = { renaming = recording },
+                            onExport = { exporting = recording },
                             onDelete = { deleting = recording },
                         )
                         HorizontalDivider()
@@ -176,6 +223,47 @@ fun LibraryScreen(
                 }
             }
         }
+    }
+
+    if (showingLicenses) {
+        val notices = remember {
+            runCatching { context.assets.open("THIRD_PARTY_NOTICES.md").bufferedReader().use { it.readText() } }
+                .getOrDefault("")
+        }
+        AlertDialog(
+            onDismissRequest = { showingLicenses = false },
+            title = { Text(stringResource(R.string.licenses)) },
+            text = {
+                Text(
+                    notices,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showingLicenses = false }) { Text(stringResource(android.R.string.ok)) }
+            },
+        )
+    }
+
+    if (choosingOptions) {
+        NewRecordingDialog(
+            initial = pendingOptions,
+            models = models,
+            onDismiss = { choosingOptions = false },
+            onStart = { options ->
+                choosingOptions = false
+                record(options)
+            },
+        )
+    }
+
+    exporting?.let { recording ->
+        ExportDialog(
+            recording = recording,
+            onDismiss = { exporting = null },
+            onMessage = { message -> scope.launch { snackbar.showSnackbar(message) } },
+        )
     }
 
     renaming?.let { recording ->
@@ -255,8 +343,10 @@ private fun ActiveRecordingCard(onOpen: () -> Unit) {
 @Composable
 private fun RecordingRow(
     recording: Recording,
+    progress: Float?,
     onOpen: () -> Unit,
     onRename: () -> Unit,
+    onExport: () -> Unit,
     onDelete: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -266,12 +356,25 @@ private fun RecordingRow(
         if (recording.bookmarkCount > 0) {
             add(pluralStringResource(R.plurals.bookmark_count, recording.bookmarkCount, recording.bookmarkCount))
         }
+        if (recording.photoCount > 0) {
+            add(pluralStringResource(R.plurals.photo_count, recording.photoCount, recording.photoCount))
+        }
+        when (recording.transcriptStatus) {
+            TranscriptStatus.DONE -> add(stringResource(R.string.status_transcribed))
+            TranscriptStatus.PENDING -> add(stringResource(R.string.status_queued))
+            TranscriptStatus.RUNNING -> add(
+                progress?.let { stringResource(R.string.status_transcribing_percent, (it * 100).toInt()) }
+                    ?: stringResource(R.string.status_transcribing),
+            )
+            TranscriptStatus.FAILED -> add(stringResource(R.string.status_transcript_failed))
+            TranscriptStatus.NONE -> {}
+        }
         if (recording.status == RecordingStatus.RECOVERED) add(stringResource(R.string.recovered))
     }
     ListItem(
         modifier = Modifier.clickable(onClick = onOpen),
         headlineContent = { Text(recording.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        supportingContent = { Text(details.joinToString("  ·  "), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text(details.joinToString("  ·  "), maxLines = 2, overflow = TextOverflow.Ellipsis) },
         trailingContent = {
             Box {
                 IconButton(onClick = { menuOpen = true }) {
@@ -281,6 +384,10 @@ private fun RecordingRow(
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.rename)) },
                         onClick = { menuOpen = false; onRename() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.export)) },
+                        onClick = { menuOpen = false; onExport() },
                     )
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.delete)) },

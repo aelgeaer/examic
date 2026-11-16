@@ -1,0 +1,23 @@
+[package]
+name = "examic-asr"
+description = "Russian speech recognition: GigaAM v3 through transcribe.cpp, VAD-guided windowing and live chunking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# transcribe.cpp is C++ built with CMake. Everything else in this crate is pure
+# Rust and is tested on the host without it.
+native = ["dep:transcribe-cpp"]
+
+[dependencies]
+transcribe-cpp = { version = "0.4.2", default-features = false, optional = true }
+thiserror.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+hound = "3"
+
+[[example]]
+name = "transcribe"
+required-features = ["native"]

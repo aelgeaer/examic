@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Nothing leaves the device. The library is encrypted with a key that lives in
-    this device's Keystore, so a copy restored elsewhere could never be opened.
+    Nothing leaves the device by backup or transfer: recordings are private, and
+    the bundled models are large and come with the app anyway.
 -->
 <data-extraction-rules>
     <cloud-backup>

@@ -5,7 +5,17 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -14,11 +24,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.aelgeaer.examic.R
 import io.github.aelgeaer.examic.audio.Recorder
 import io.github.aelgeaer.examic.audio.RecorderEvent
 import io.github.aelgeaer.examic.audio.RecorderStatus
+import io.github.aelgeaer.examic.examicApp
+import io.github.aelgeaer.examic.models.ModelState
 import io.github.aelgeaer.examic.ui.library.LibraryScreen
 import io.github.aelgeaer.examic.ui.player.PlayerScreen
 import io.github.aelgeaer.examic.ui.recorder.RecorderScreen
@@ -58,6 +75,19 @@ private val ScreenSaver = Saver<Screen, String>(
     },
 )
 
+/** Shown once per app version while the bundled models are unpacked. */
+@Composable
+private fun ModelInstallScreen(progress: Float) {
+    Surface(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text(stringResource(R.string.models_installing), style = MaterialTheme.typography.titleMedium)
+                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
 /**
  * Three screens and a back stack one level deep: a navigation library would
  * be more machinery than the app it navigates.
@@ -65,6 +95,11 @@ private val ScreenSaver = Saver<Screen, String>(
 @Composable
 private fun ExamicNavigation() {
     val context = LocalContext.current
+    val models by context.examicApp.models.state.collectAsStateWithLifecycle()
+    (models as? ModelState.Installing)?.let {
+        ModelInstallScreen(it.progress)
+        return
+    }
     val snackbar = remember { SnackbarHostState() }
     var screen by rememberSaveable(stateSaver = ScreenSaver) {
         // Reopening the app during a recording lands on the recorder.
@@ -89,8 +124,8 @@ private fun ExamicNavigation() {
     when (val current = screen) {
         Screen.Library -> LibraryScreen(
             snackbar = snackbar,
-            onRecord = { title ->
-                Recorder.start(context, title)
+            onRecord = { title, options ->
+                Recorder.start(context, title, options)
                 screen = Screen.Recorder
             },
             onOpenRecorder = { screen = Screen.Recorder },

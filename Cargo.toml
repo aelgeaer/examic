@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    "core/crates/examic-vault",
     "core/crates/examic-audio",
     "core/crates/examic-db",
-    "core/crates/examic-sqlcipher",
+    "core/crates/examic-asr",
+    "core/crates/examic-mt",
     "core/crates/examic-ffi",
     "core/tools/uniffi-bindgen",
 ]
@@ -15,17 +15,16 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-examic-vault = { path = "core/crates/examic-vault" }
 examic-audio = { path = "core/crates/examic-audio" }
 examic-db = { path = "core/crates/examic-db" }
-examic-sqlcipher = { path = "core/crates/examic-sqlcipher" }
+examic-asr = { path = "core/crates/examic-asr" }
+examic-mt = { path = "core/crates/examic-mt" }
 
 thiserror = "2"
 log = "0.4"
-zeroize = "1"
 
 [profile.release]
-# The Rust in this workspace is small and dominated by DSP and crypto loops, so
+# The Rust in this workspace is small and dominated by DSP loops, so
 # it is built for speed. `opt-level = "z"` would switch off loop vectorisation
 # in exactly those loops and save only a few hundred KB.
 opt-level = 3

@@ -2,32 +2,35 @@
 //!
 //! Two doors lead in:
 //! * the UniFFI API in this file, for everything the app does a few times a
-//!   second or less (start, stop, list, bookmark, read audio for playback);
+//!   second or less (start, stop, list, bookmark, transcribe, export);
 //! * the two raw JNI functions in [`jni_audio`], for microphone samples and
 //!   the live meter.
 
+mod backends;
 mod codec;
 mod engine;
+mod export;
 mod jni_audio;
+mod transcription;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use backends::ModelPaths;
 use engine::{Engine, EngineError};
-use zeroize::Zeroize;
 
 uniffi::setup_scaffolding!();
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum ExamicError {
-    /// The recording or bookmark does not exist (any more).
+    /// The recording, bookmark or photo does not exist (any more).
     #[error("{0}")]
     NotFound(String),
     /// The call makes no sense right now, e.g. stopping when nothing records.
     #[error("{0}")]
     InvalidState(String),
-    /// Disk, database or encryption failure.
+    /// Disk or database failure.
     #[error("{0}")]
     Storage(String),
     #[error("{0}")]
@@ -41,12 +44,13 @@ impl From<EngineError> for ExamicError {
             EngineError::NotFound => Self::NotFound(message),
             EngineError::AlreadyRecording
             | EngineError::NotRecording
-            | EngineError::StillRecording => Self::InvalidState(message),
-            EngineError::BadKey(_) => Self::InvalidArgument(message),
-            EngineError::Db(_)
-            | EngineError::Vault(_)
-            | EngineError::Capture(_)
-            | EngineError::Io(_) => Self::Storage(message),
+            | EngineError::StillRecording
+            | EngineError::Busy
+            | EngineError::NoTranscript => Self::InvalidState(message),
+            EngineError::InvalidArgument(_) => Self::InvalidArgument(message),
+            EngineError::Db(_) | EngineError::Capture(_) | EngineError::Io(_) => {
+                Self::Storage(message)
+            }
         }
     }
 }
@@ -61,6 +65,60 @@ pub enum RecordingStatus {
     Recovered,
 }
 
+/// When a recording is transcribed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TranscribeMode {
+    Off,
+    /// While recording, one stretch of speech at a time.
+    Live,
+    /// Once the recording has stopped.
+    After,
+}
+
+impl From<TranscribeMode> for examic_db::TranscribeMode {
+    fn from(m: TranscribeMode) -> Self {
+        match m {
+            TranscribeMode::Off => Self::Off,
+            TranscribeMode::Live => Self::Live,
+            TranscribeMode::After => Self::After,
+        }
+    }
+}
+
+impl From<examic_db::TranscribeMode> for TranscribeMode {
+    fn from(m: examic_db::TranscribeMode) -> Self {
+        match m {
+            examic_db::TranscribeMode::Off => Self::Off,
+            examic_db::TranscribeMode::Live => Self::Live,
+            examic_db::TranscribeMode::After => Self::After,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TranscriptStatus {
+    /// Never transcribed.
+    None,
+    /// Waiting for earlier work to finish.
+    Pending,
+    Running,
+    Done,
+    /// Stopped by an error or by the app closing; can be started again.
+    Failed,
+}
+
+impl From<examic_db::TranscriptStatus> for TranscriptStatus {
+    fn from(s: examic_db::TranscriptStatus) -> Self {
+        match s {
+            examic_db::TranscriptStatus::None => Self::None,
+            examic_db::TranscriptStatus::Pending => Self::Pending,
+            examic_db::TranscriptStatus::Running => Self::Running,
+            examic_db::TranscriptStatus::Done => Self::Done,
+            examic_db::TranscriptStatus::Failed => Self::Failed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Recording {
     pub id: String,
@@ -70,6 +128,10 @@ pub struct Recording {
     pub size_bytes: i64,
     pub status: RecordingStatus,
     pub bookmark_count: i32,
+    pub photo_count: i32,
+    pub transcribe_mode: TranscribeMode,
+    pub translate: bool,
+    pub transcript_status: TranscriptStatus,
 }
 
 impl From<examic_db::Recording> for Recording {
@@ -86,6 +148,10 @@ impl From<examic_db::Recording> for Recording {
                 examic_db::RecordingStatus::Recovered => RecordingStatus::Recovered,
             },
             bookmark_count: r.bookmark_count as i32,
+            photo_count: r.photo_count as i32,
+            transcribe_mode: r.transcribe_mode.into(),
+            translate: r.translate,
+            transcript_status: r.transcript_status.into(),
         }
     }
 }
@@ -114,6 +180,133 @@ pub struct SpeechSpan {
     pub end_ms: i64,
 }
 
+/// One transcribed stretch of speech.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TranscriptSegment {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// What was said, in Russian.
+    pub text: String,
+    /// Its English translation, if the recording is translated.
+    pub translation: Option<String>,
+}
+
+impl From<examic_db::TranscriptSegment> for TranscriptSegment {
+    fn from(s: examic_db::TranscriptSegment) -> Self {
+        Self {
+            start_ms: s.start_ms,
+            end_ms: s.end_ms,
+            text: s.text_ru,
+            translation: s.text_en,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Photo {
+    pub id: i64,
+    pub timestamp_ms: i64,
+    /// Path relative to the data directory the engine was opened with.
+    pub file: String,
+}
+
+impl From<examic_db::Photo> for Photo {
+    fn from(p: examic_db::Photo) -> Self {
+        Self {
+            id: p.id,
+            timestamp_ms: p.timestamp_ms,
+            file: p.file,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TimelineKind {
+    Speech,
+    Bookmark,
+    Photo,
+}
+
+/// One entry of a recording's merged timeline, for export.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TimelineEntry {
+    pub kind: TimelineKind,
+    pub time_ms: i64,
+    /// Speech: the transcript. Bookmark: its note, if any.
+    pub text: Option<String>,
+    /// Speech: the English translation, if included.
+    pub translation: Option<String>,
+    /// Photo: path relative to the data directory.
+    pub file: Option<String>,
+}
+
+impl From<export::Entry> for TimelineEntry {
+    fn from(e: export::Entry) -> Self {
+        let time_ms = e.time_ms();
+        match e {
+            export::Entry::Speech {
+                text, translation, ..
+            } => Self {
+                kind: TimelineKind::Speech,
+                time_ms,
+                text: Some(text),
+                translation,
+                file: None,
+            },
+            export::Entry::Bookmark { note, .. } => Self {
+                kind: TimelineKind::Bookmark,
+                time_ms,
+                text: note,
+                translation: None,
+                file: None,
+            },
+            export::Entry::Photo { file, .. } => Self {
+                kind: TimelineKind::Photo,
+                time_ms,
+                text: None,
+                translation: None,
+                file: Some(file),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ExportFormat {
+    /// A plain `.md` file.
+    Markdown,
+    /// A `.zip` holding `recording.md` and a `photos/` folder.
+    Zip,
+}
+
+/// Implemented by the app to hear about transcription progress. Called on
+/// the engine's worker threads.
+#[uniffi::export(with_foreign)]
+pub trait TranscriptListener: Send + Sync {
+    /// `progress` is `0.0..=1.0` for work on a finished recording, `None`
+    /// during live transcription.
+    fn on_transcript_changed(
+        &self,
+        recording_id: String,
+        status: TranscriptStatus,
+        progress: Option<f32>,
+    );
+}
+
+struct ListenerAdapter(Arc<dyn TranscriptListener>);
+
+impl transcription::EngineEvents for ListenerAdapter {
+    fn transcript_changed(
+        &self,
+        id: &str,
+        status: examic_db::TranscriptStatus,
+        progress: Option<f32>,
+    ) {
+        self.0
+            .on_transcript_changed(id.to_owned(), status.into(), progress);
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct ExamicEngine {
     engine: Engine,
@@ -121,25 +314,49 @@ pub struct ExamicEngine {
 
 #[uniffi::export]
 impl ExamicEngine {
-    /// Opens the library stored in `data_dir`. `master_key` is the 32-byte
-    /// key that encrypts the database and every recording.
+    /// Opens the library stored in `data_dir` (the app's private files
+    /// directory) and recovers any recording a crash interrupted.
     #[uniffi::constructor]
-    pub fn open(data_dir: String, mut master_key: Vec<u8>) -> Result<Arc<Self>> {
+    pub fn open(data_dir: String) -> Result<Arc<Self>> {
         init_logging();
-        let engine = Engine::open(Path::new(&data_dir), &master_key);
-        master_key.zeroize();
-        Ok(Arc::new(Self { engine: engine? }))
+        Ok(Arc::new(Self {
+            engine: Engine::open(Path::new(&data_dir))?,
+        }))
+    }
+
+    /// Where the bundled models were unpacked: the GigaAM `.gguf` file and the
+    /// Opus-MT directory. Until this is called, transcription fails.
+    pub fn set_models(&self, asr_model: Option<String>, mt_dir: Option<String>) {
+        self.engine.set_models(ModelPaths {
+            asr_model: asr_model.map(PathBuf::from),
+            mt_dir: mt_dir.map(PathBuf::from),
+        });
+    }
+
+    pub fn set_transcript_listener(&self, listener: Option<Arc<dyn TranscriptListener>>) {
+        self.engine.set_events(
+            listener.map(|l| Arc::new(ListenerAdapter(l)) as Arc<dyn transcription::EngineEvents>),
+        );
     }
 
     /// Starts a recording. Afterwards `NativeAudio.pushPcm` accepts mono
     /// 16-bit samples at `sample_rate` (16000, 32000 or 48000 Hz).
-    pub fn start_recording(&self, title: String, sample_rate: u32) -> Result<Recording> {
-        let (recording, input) = self.engine.start_recording(&title, sample_rate)?;
+    pub fn start_recording(
+        &self,
+        title: String,
+        sample_rate: u32,
+        mode: TranscribeMode,
+        translate: bool,
+    ) -> Result<Recording> {
+        let (recording, input) =
+            self.engine
+                .start_recording(&title, sample_rate, mode.into(), translate)?;
         jni_audio::attach(input);
         Ok(recording.into())
     }
 
     /// Stops the recording in progress and returns it in its final state.
+    /// In after-recording mode its transcription starts now.
     pub fn stop_recording(&self) -> Result<Recording> {
         jni_audio::detach();
         Ok(self.engine.stop_recording()?.into())
@@ -167,6 +384,7 @@ impl ExamicEngine {
         Ok(self.engine.rename_recording(&id, &title)?)
     }
 
+    /// Deletes a recording with its audio, photos, bookmarks and transcript.
     pub fn delete_recording(&self, id: String) -> Result<()> {
         Ok(self.engine.delete_recording(&id)?)
     }
@@ -209,35 +427,109 @@ impl ExamicEngine {
             .collect())
     }
 
-    /// Opens a recording's audio for playback.
-    pub fn open_audio(&self, recording_id: String) -> Result<Arc<AudioReader>> {
-        Ok(Arc::new(AudioReader {
-            reader: self.engine.open_audio(&recording_id)?,
-        }))
-    }
-}
-
-/// The decrypted Ogg Opus stream of one recording, readable at any offset.
-#[derive(uniffi::Object)]
-pub struct AudioReader {
-    reader: engine::AudioReader,
-}
-
-#[uniffi::export]
-impl AudioReader {
-    /// Length of the stream in bytes.
-    pub fn length(&self) -> i64 {
-        self.reader.len() as i64
+    /// Absolute path of a finished recording's Ogg Opus file, for playback.
+    pub fn audio_path(&self, recording_id: String) -> Result<String> {
+        Ok(self
+            .engine
+            .audio_path(&recording_id)?
+            .to_string_lossy()
+            .into_owned())
     }
 
-    /// Up to `max_len` bytes starting at `position`; empty at the end.
-    pub fn read(&self, position: i64, max_len: i32) -> Result<Vec<u8>> {
-        if position < 0 || max_len < 0 {
-            return Err(ExamicError::InvalidArgument(
-                "position and length must not be negative".into(),
-            ));
-        }
-        Ok(self.reader.read(position as u64, max_len as usize)?)
+    /// Queues a finished recording for transcription (replacing any earlier
+    /// transcript), optionally translated into English.
+    pub fn transcribe_recording(&self, recording_id: String, translate: bool) -> Result<()> {
+        Ok(self.engine.transcribe_recording(&recording_id, translate)?)
+    }
+
+    /// Queues translation of a transcript's untranslated segments.
+    pub fn translate_recording(&self, recording_id: String) -> Result<()> {
+        Ok(self.engine.translate_recording(&recording_id)?)
+    }
+
+    /// A recording's transcript in timeline order (also while it grows).
+    pub fn transcript(&self, recording_id: String) -> Result<Vec<TranscriptSegment>> {
+        Ok(self
+            .engine
+            .transcript(&recording_id)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    /// Progress (`0.0..=1.0`) of work on a finished recording while it runs.
+    pub fn transcript_progress(&self, recording_id: String) -> Option<f32> {
+        self.engine.transcript_progress(&recording_id)
+    }
+
+    /// The folder, relative to the data directory, to save a recording's
+    /// photos in. It exists when this returns.
+    pub fn photo_dir(&self, recording_id: String) -> Result<String> {
+        Ok(self.engine.photo_dir(&recording_id)?)
+    }
+
+    /// Registers a photo saved at `file` (relative, inside `photo_dir`).
+    /// With `timestamp_ms` omitted it is placed at "now" in the recording in
+    /// progress.
+    pub fn add_photo(
+        &self,
+        recording_id: String,
+        file: String,
+        timestamp_ms: Option<i64>,
+    ) -> Result<Photo> {
+        Ok(self
+            .engine
+            .add_photo(&recording_id, &file, timestamp_ms)?
+            .into())
+    }
+
+    /// Photos of a recording in timeline order.
+    pub fn photos(&self, recording_id: String) -> Result<Vec<Photo>> {
+        Ok(self
+            .engine
+            .photos(&recording_id)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn delete_photo(&self, photo_id: i64) -> Result<()> {
+        Ok(self.engine.delete_photo(photo_id)?)
+    }
+
+    /// Transcript, bookmarks and photos merged in timeline order.
+    pub fn export_timeline(
+        &self,
+        recording_id: String,
+        include_translation: bool,
+    ) -> Result<Vec<TimelineEntry>> {
+        Ok(self
+            .engine
+            .timeline(&recording_id, include_translation)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    /// Writes the recording as Markdown to `dest_path`; a `.zip` with its
+    /// photos when it has any. `date` is printed as given.
+    pub fn export_markdown(
+        &self,
+        recording_id: String,
+        include_translation: bool,
+        date: String,
+        dest_path: String,
+    ) -> Result<ExportFormat> {
+        let format = self.engine.export_markdown(
+            &recording_id,
+            include_translation,
+            &date,
+            Path::new(&dest_path),
+        )?;
+        Ok(match format {
+            export::ExportFormat::Markdown => ExportFormat::Markdown,
+            export::ExportFormat::Zip => ExportFormat::Zip,
+        })
     }
 }
 

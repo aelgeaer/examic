@@ -1,0 +1,339 @@
+[
+ {
+  "text": "Добрый день, коллеги.",
+  "output_ids": [
+   4940,
+   18542,
+   2,
+   7679,
+   3
+  ],
+  "translation": "Good afternoon, colleagues."
+ },
+ {
+  "text": "Сегодня мы поговорим о линейной алгебре.",
+  "output_ids": [
+   2556,
+   91,
+   50,
+   194,
+   802,
+   11,
+   2292,
+   134,
+   24253,
+   5171,
+   1217,
+   5300,
+   3
+  ],
+  "translation": "Today we're going to talk about linear algebra."
+ },
+ {
+  "text": "Откройте, пожалуйста, учебник на странице сорок два.",
+  "output_ids": [
+   3597,
+   972,
+   4,
+   25319,
+   27,
+   4142,
+   14807,
+   14,
+   70,
+   5400,
+   3
+  ],
+  "translation": "Please open the textbook on page forty-two."
+ },
+ {
+  "text": "Экзамен состоится в следующий вторник в десять утра.",
+  "output_ids": [
+   25,
+   20468,
+   66,
+   361,
+   448,
+   814,
+   11063,
+   76,
+   403,
+   16333,
+   3
+  ],
+  "translation": "The exam will take place next Tuesday at 10:00."
+ },
+ {
+  "text": "Кто может объяснить, что такое собственный вектор?",
+  "output_ids": [
+   2699,
+   80,
+   4584,
+   208,
+   96,
+   430,
+   24464,
+   16,
+   43
+  ],
+  "translation": "Who can explain what your own vector is?"
+ },
+ {
+  "text": "Основной религией в Молдавии является православное христианство.",
+  "output_ids": [
+   25,
+   708,
+   3948,
+   12,
+   10427,
+   16,
+   8075,
+   17025,
+   3
+  ],
+  "translation": "The main religion in Moldova is Orthodox Christianity."
+ },
+ {
+  "text": "Амазонка также является самой широкой рекой на Земле.",
+  "output_ids": [
+   25,
+   7801,
+   16,
+   113,
+   4,
+   2718,
+   653,
+   9268,
+   27,
+   2248,
+   3
+  ],
+  "translation": "The Amazon is also the widest river on Earth."
+ },
+ {
+  "text": "Я не уверен, что мы успеем закончить проект к пятнице.",
+  "output_ids": [
+   47,
+   50,
+   236,
+   56,
+   1919,
+   91,
+   50,
+   426,
+   9195,
+   4,
+   659,
+   42,
+   8376,
+   3
+  ],
+  "translation": "I'm not sure we'll finish the project by Friday."
+ },
+ {
+  "text": "Давайте вернёмся к этому вопросу после перерыва.",
+  "output_ids": [
+   3403,
+   50,
+   10,
+   610,
+   530,
+   11,
+   67,
+   301,
+   4,
+   3846,
+   3
+  ],
+  "translation": "Let's go back to this after the break."
+ },
+ {
+  "text": "В 2010 году число студентов выросло на 8%.",
+  "output_ids": [
+   86,
+   1546,
+   2,
+   4,
+   389,
+   5,
+   1669,
+   1808,
+   42,
+   736,
+   641,
+   1913,
+   3
+  ],
+  "translation": "In 2010, the number of students increased by 8 per cent."
+ },
+ {
+  "text": "Москва — столица России.",
+  "output_ids": [
+   1687,
+   16,
+   4,
+   1498,
+   5,
+   387,
+   3
+  ],
+  "translation": "Moscow is the capital of Russia."
+ },
+ {
+  "text": "Спасибо всем за внимание.",
+  "output_ids": [
+   10671,
+   39,
+   88,
+   20,
+   96,
+   1319,
+   3
+  ],
+  "translation": "Thank you all for your attention."
+ },
+ {
+  "text": "Это не казалось мне имеющим смысл. Конечно, это не было справедливым.",
+  "output_ids": [
+   2515,
+   892,
+   41,
+   7478,
+   50,
+   70,
+   3830,
+   3
+  ],
+  "translation": "Of course it wasn't fair."
+ },
+ {
+  "text": "Прежде чем организация сможет стать инновационной, руководители должны создать культуру новаторства.",
+  "output_ids": [
+   5923,
+   4,
+   1407,
+   3405,
+   4905,
+   2,
+   9901,
+   381,
+   1177,
+   13,
+   2637,
+   5,
+   5323,
+   3
+  ],
+  "translation": "Before the organization becomes innovative, managers must create a culture of innovation."
+ },
+ {
+  "text": "Ну, в общем, да.",
+  "output_ids": [
+   3380,
+   2,
+   11227,
+   2817,
+   2,
+   11227,
+   2817,
+   2,
+   11227,
+   2817,
+   2,
+   11227,
+   2817,
+   3
+  ],
+  "translation": "Well, yeah, yeah, yeah, yeah."
+ },
+ {
+  "text": "Пожалуйста, запишите домашнее задание.",
+  "output_ids": [
+   3597,
+   4213,
+   713,
+   96,
+   777,
+   3887,
+   3
+  ],
+  "translation": "Please write down your homework."
+ },
+ {
+  "text": "Функция непрерывна на всём отрезке.",
+  "output_ids": [
+   25,
+   2949,
+   16,
+   10059,
+   76,
+   88,
+   3
+  ],
+  "translation": "The function is continuous at all."
+ },
+ {
+  "text": "Иван Петрович опоздал на встречу.",
+  "output_ids": [
+   15876,
+   16410,
+   2228,
+   1043,
+   53,
+   2828,
+   20,
+   13,
+   799,
+   3
+  ],
+  "translation": "Ivan Petrovich was late for a meeting."
+ },
+ {
+  "text": "Почему этот метод не работает для больших матриц?",
+  "output_ids": [
+   1726,
+   2297,
+   50,
+   70,
+   67,
+   2692,
+   214,
+   20,
+   1879,
+   3072,
+   10803,
+   248,
+   43
+  ],
+  "translation": "Why doesn't this method work for big matrices?"
+ },
+ {
+  "text": "Следующая лекция будет посвящена теории вероятностей и математической статистике, поэтому повторите материал прошлого семестра.",
+  "output_ids": [
+   25,
+   814,
+   13459,
+   66,
+   2233,
+   27,
+   18657,
+   3564,
+   9,
+   16115,
+   5710,
+   2,
+   181,
+   10433,
+   4,
+   1588,
+   5,
+   4,
+   1132,
+   5120,
+   1585,
+   1971,
+   3
+  ],
+  "translation": "The next lecture will focus on probability theory and mathematical statistics, so repeat the material of the past semester."
+ }
+]

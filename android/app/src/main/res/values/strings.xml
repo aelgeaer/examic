@@ -14,7 +14,7 @@
     <!-- Library -->
     <string name="record">Record</string>
     <string name="library_empty_title">No recordings yet</string>
-    <string name="library_empty_body">Record a meeting or a lecture. Everything stays on this device, encrypted.</string>
+    <string name="library_empty_body">Record a meeting or a lecture. Recording, transcription and translation all happen on this device.</string>
     <string name="library_unlock_failed">The library could not be opened</string>
     <string name="recording_in_progress">Recording in progress</string>
     <string name="open">Open</string>
@@ -29,6 +29,32 @@
     <string name="delete_title">Delete recording?</string>
     <string name="delete_body">“%1$s” will be removed permanently.</string>
     <string name="microphone_denied">Examic needs the microphone to record. You can allow it in the app\'s settings.</string>
+    <string name="export">Export</string>
+    <string name="status_transcribed">Transcript</string>
+    <string name="status_transcribing">Transcribing</string>
+    <string name="status_transcribing_percent">Transcribing %1$d%%</string>
+    <string name="status_queued">Waiting to transcribe</string>
+    <string name="status_transcript_failed">Transcription failed</string>
+    <plurals name="photo_count">
+        <item quantity="one">%1$d photo</item>
+        <item quantity="other">%1$d photos</item>
+    </plurals>
+    <string name="licenses">Licenses</string>
+
+    <!-- New recording -->
+    <string name="new_recording">New recording</string>
+    <string name="start_recording">Record</string>
+    <string name="transcription">Transcription</string>
+    <string name="mode_off">Off</string>
+    <string name="mode_live">Live</string>
+    <string name="mode_after">After</string>
+    <string name="mode_off_help">Record audio only. You can transcribe it later.</string>
+    <string name="mode_live_help">Text appears while you record. Uses more battery.</string>
+    <string name="mode_after_help">The recording is transcribed once you stop.</string>
+    <string name="translate_to_english">Translate to English</string>
+    <string name="models_installing">Preparing the speech models…</string>
+    <string name="models_not_bundled">This build has no speech models: recordings will not be transcribed.</string>
+    <string name="models_failed">The speech models could not be prepared: %1$s</string>
 
     <!-- Recorder -->
     <string name="recorder_starting">Starting…</string>
@@ -46,6 +72,13 @@
     <string name="speech_detected">Speech</string>
     <string name="no_speech_detected">Listening</string>
     <string name="recording_failed">The recording stopped: %1$s</string>
+    <string name="take_photo">Photo</string>
+    <string name="photo_added">Photo at %1$s</string>
+    <string name="shutter">Take photo</string>
+    <string name="flip_camera">Switch camera</string>
+    <string name="camera_denied">Examic needs the camera to take photos. You can allow it in the app\'s settings.</string>
+    <string name="camera_unavailable">The camera is not available.</string>
+    <string name="live_transcript_waiting">Speak, and the transcript appears here.</string>
 
     <!-- Player -->
     <string name="play">Play</string>
@@ -61,9 +94,36 @@
     <string name="highlight_label">Highlight</string>
     <string name="delete_bookmark">Delete bookmark</string>
     <string name="recovered_notice">This recording was interrupted. Its end may be missing.</string>
+    <string name="transcript">Transcript</string>
+    <string name="photos">Photos</string>
+    <string name="transcribe_now">Transcribe now</string>
+    <string name="transcribe_again">Transcribe again</string>
+    <string name="translate">Translate</string>
+    <string name="transcript_none">Not transcribed yet.</string>
+    <string name="transcript_empty">No speech was recognised.</string>
+    <string name="transcript_failed">Transcription stopped before it finished.</string>
+    <string name="transcript_running_live">Transcribing the rest of the recording…</string>
+    <string name="delete_photo">Delete photo</string>
+    <string name="photo_at">Photo at %1$s</string>
+
+    <!-- Export -->
+    <string name="export_title">Export “%1$s”</string>
+    <string name="export_markdown">Markdown</string>
+    <string name="export_markdown_help">Text with timestamps. With photos, a .zip that holds them.</string>
+    <string name="export_pdf">PDF</string>
+    <string name="export_pdf_help">A printable document with the photos in place.</string>
+    <string name="export_include_translation">Include English translation</string>
+    <string name="export_save">Save…</string>
+    <string name="export_share">Share</string>
+    <string name="export_saved">Exported</string>
+    <string name="export_date">Date</string>
+    <string name="export_duration">Duration</string>
+    <string name="export_no_transcript">No transcript.</string>
 
     <!-- Notification -->
     <string name="notification_channel">Recording</string>
     <string name="notification_recording">Recording</string>
     <string name="notification_paused">Recording paused</string>
+    <string name="notification_channel_transcription">Transcription</string>
+    <string name="notification_transcribing">Transcribing</string>
 </resources>

@@ -1,13 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Transcribing a long recording keeps going when the app is left. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Photos of the board or slides, taken in the app during a recording. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
-    <!-- No INTERNET permission: nothing this app records can leave the device. -->
+    <!--
+        No network access: recording, transcription and translation all run on
+        the device, and nothing leaves it unless the user exports it. Libraries
+        that ask for the network anyway (ONNX Runtime, Media3) have it removed.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
 
     <application
         android:name=".ExamicApp"
@@ -39,5 +51,27 @@
             android:name=".audio.RecorderService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <service
+            android:name=".transcription.TranscriptionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- ONNX Runtime's usage telemetry; never wanted, and it could not send anyway. -->
+        <provider
+            android:name="ai.onnxruntime.TelemetryInitializer"
+            android:authorities="${applicationId}.onnxruntime_telemetry_initializer"
+            tools:node="remove" />
+
+        <!-- Hands exported files to the share sheet. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.exports"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/export_paths" />
+        </provider>
     </application>
 </manifest>

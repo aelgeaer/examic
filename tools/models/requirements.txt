@@ -1,0 +1,9 @@
+# Only needed to regenerate the translation model bundle; app builds download it.
+torch>=2.4
+transformers>=4.45,<5
+optimum[onnxruntime]>=1.23
+optimum-onnx
+onnx
+onnxruntime>=1.19
+sentencepiece
+huggingface_hub

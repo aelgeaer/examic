@@ -174,6 +174,11 @@ impl SpeechSegmenter {
         }
     }
 
+    /// Whether speech is in progress: an interval has started and not closed.
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
     /// Closes an interval still open when the recording ends at `total_ms`.
     pub fn finish(&mut self, total_ms: u64) -> Option<SpeechInterval> {
         self.close(total_ms)

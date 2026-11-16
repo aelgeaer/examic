@@ -18,6 +18,8 @@ import android.os.Process
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import io.github.aelgeaer.examic.R
+import io.github.aelgeaer.examic.core.TranscribeMode
+import io.github.aelgeaer.examic.transcription.TranscriptionService
 import io.github.aelgeaer.examic.ui.MainActivity
 import io.github.aelgeaer.examic.withEngine
 import java.nio.ByteBuffer
@@ -56,7 +58,13 @@ class RecorderService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> start(intent.getStringExtra(EXTRA_TITLE).orEmpty())
+            ACTION_START -> start(
+                title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
+                mode = intent.getStringExtra(EXTRA_MODE)
+                    ?.let { name -> TranscribeMode.entries.firstOrNull { it.name == name } }
+                    ?: TranscribeMode.OFF,
+                translate = intent.getBooleanExtra(EXTRA_TRANSLATE, false),
+            )
             ACTION_STOP -> stop(failure = null)
             ACTION_PAUSE -> setPaused(true)
             ACTION_RESUME -> setPaused(false)
@@ -64,7 +72,7 @@ class RecorderService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun start(title: String) {
+    private fun start(title: String, mode: TranscribeMode, translate: Boolean) {
         if (capture != null || Recorder.status.value != RecorderStatus.Starting) return
         try {
             // Must happen within seconds of startForegroundService().
@@ -84,8 +92,8 @@ class RecorderService : Service() {
                 val thread = withEngine { engine ->
                     val (record, sampleRate) = openMicrophone()
                     try {
-                        val recording = engine.startRecording(title, sampleRate.toUInt())
-                        CaptureThread(record, sampleRate, recording.id)
+                        val recording = engine.startRecording(title, sampleRate.toUInt(), mode, translate)
+                        CaptureThread(record, sampleRate, recording.id, mode)
                     } catch (e: Exception) {
                         record.release()
                         throw e
@@ -158,6 +166,11 @@ class RecorderService : Service() {
                 }
             }
             failure?.let { Recorder.mutableEvents.tryEmit(RecorderEvent.Failed(it)) }
+            // Transcription goes on after the recording: hand over to a
+            // service that keeps the process alive for it. Started from here,
+            // while this service is still in the foreground, the system allows
+            // it even with the screen off.
+            if (thread.mode != TranscribeMode.OFF) TranscriptionService.start(this@RecorderService)
             result
                 .onSuccess { Recorder.mutableEvents.tryEmit(RecorderEvent.Finished(it)) }
                 .onFailure { if (failure == null) Recorder.mutableEvents.tryEmit(RecorderEvent.Failed(it.describe())) }
@@ -222,6 +235,7 @@ class RecorderService : Service() {
         private val record: AudioRecord,
         sampleRate: Int,
         val recordingId: String,
+        val mode: TranscribeMode,
     ) : Thread("examic-mic") {
         @Volatile var running = true
         @Volatile var paused = false
@@ -268,6 +282,8 @@ class RecorderService : Service() {
         const val ACTION_PAUSE = "io.github.aelgeaer.examic.action.PAUSE"
         const val ACTION_RESUME = "io.github.aelgeaer.examic.action.RESUME"
         const val EXTRA_TITLE = "title"
+        const val EXTRA_MODE = "mode"
+        const val EXTRA_TRANSLATE = "translate"
 
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1

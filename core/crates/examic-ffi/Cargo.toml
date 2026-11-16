@@ -7,21 +7,38 @@ license.workspace = true
 
 [lib]
 name = "examic_core"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The real codec and models on the host as well: what the Android build
+# always uses. For the end-to-end test (see engine.rs); needs CMake.
+native = ["examic-audio/opus", "examic-asr/native", "examic-mt/native", "dep:opus"]
 
 [dependencies]
-examic-vault.workspace = true
+opus = { version = "0.4", optional = true }
 examic-audio.workspace = true
 examic-db.workspace = true
+examic-asr.workspace = true
+examic-mt.workspace = true
+ogg = "0.9"
 uniffi = "0.32"
 jni-sys = "0.4"
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 thiserror.workspace = true
-zeroize.workspace = true
 log.workspace = true
 
-# libopus needs CMake, so only the shipped library is built with it. Anywhere
-# else the crate exists to run the engine's tests, which use a stand-in encoder.
+# libopus, transcribe.cpp and the ONNX Runtime bindings need CMake or a
+# runtime library, so only the shipped library is built with them (and host
+# builds with feature "native"). Anywhere else the crate exists to run the
+# engine's tests, which use stand-ins.
 [target.'cfg(target_os = "android")'.dependencies]
 examic-audio = { workspace = true, features = ["opus"] }
+examic-asr = { workspace = true, features = ["native"] }
+examic-mt = { workspace = true, features = ["native"] }
+opus = "0.4"
+libc = "0.2"
 android_logger = { version = "0.15", default-features = false }
+
+[dev-dependencies]
+hound = "3"

@@ -3,6 +3,7 @@ package io.github.aelgeaer.examic.audio
 import android.content.Context
 import android.content.Intent
 import io.github.aelgeaer.examic.core.Recording
+import io.github.aelgeaer.examic.settings.RecordingOptions
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,13 +38,15 @@ object Recorder {
     val events: SharedFlow<RecorderEvent> = mutableEvents
 
     /** Starts recording. Requires the RECORD_AUDIO permission and a visible activity. */
-    fun start(context: Context, title: String) {
+    fun start(context: Context, title: String, options: RecordingOptions) {
         // Flipped here rather than in the service so the UI never observes
         // "idle" between asking for a recording and the service starting.
         if (!mutableStatus.compareAndSet(RecorderStatus.Idle, RecorderStatus.Starting)) return
         val intent = Intent(context, RecorderService::class.java)
             .setAction(RecorderService.ACTION_START)
             .putExtra(RecorderService.EXTRA_TITLE, title)
+            .putExtra(RecorderService.EXTRA_MODE, options.mode.name)
+            .putExtra(RecorderService.EXTRA_TRANSLATE, options.translate)
         try {
             context.startForegroundService(intent)
         } catch (e: RuntimeException) {

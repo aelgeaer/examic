@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
@@ -47,22 +49,30 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.aelgeaer.examic.R
 import io.github.aelgeaer.examic.audio.NativeAudio
 import io.github.aelgeaer.examic.audio.Recorder
 import io.github.aelgeaer.examic.audio.RecorderStatus
+import io.github.aelgeaer.examic.core.TranscribeMode
+import io.github.aelgeaer.examic.core.TranscriptSegment
+import io.github.aelgeaer.examic.examicApp
 import io.github.aelgeaer.examic.ui.attempt
 import io.github.aelgeaer.examic.ui.formatDuration
 import io.github.aelgeaer.examic.withEngine
+import java.io.File
 import kotlin.math.max
 import kotlin.math.min
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 
 /** One waveform bar per this much audio. */
 private const val BAR_INTERVAL_NANOS = 50_000_000L
 private const val SPEECH_THRESHOLD = 0.5f
+/** Live transcript segments shown on the recorder; older ones scroll away. */
+private const val LIVE_SEGMENTS = 3
 
 /** The most recent bars of the live waveform, newest first. */
 private class Waveform(private val capacity: Int) {
@@ -104,6 +114,9 @@ fun RecorderScreen(onBack: () -> Unit) {
     var speaking by remember { mutableStateOf(false) }
     val waveform = remember { Waveform(capacity = 400) }
     var noteAtMs by remember { mutableStateOf<Long?>(null) }
+    var cameraOpen by remember { mutableStateOf(false) }
+    var mode by remember { mutableStateOf(TranscribeMode.OFF) }
+    var liveTranscript by remember { mutableStateOf(emptyList<TranscriptSegment>()) }
 
     // Nothing to show without a recording, e.g. when the screen is restored
     // after the process was killed.
@@ -130,6 +143,19 @@ fun RecorderScreen(onBack: () -> Unit) {
                 barStartedAt = now
             }
         }
+    }
+
+    // In live mode the transcript grows while recording; the engine says when.
+    LaunchedEffect(recording?.recordingId) {
+        val id = recording?.recordingId ?: return@LaunchedEffect
+        mode = attempt({}) { context.withEngine { it.recording(id).transcribeMode } } ?: TranscribeMode.OFF
+        if (mode != TranscribeMode.LIVE) return@LaunchedEffect
+        context.examicApp.transcriptEvents
+            .filter { it.recordingId == id }
+            .collect {
+                attempt({}) { context.withEngine { engine -> engine.transcript(id) } }
+                    ?.let { segments -> liveTranscript = segments.takeLast(LIVE_SEGMENTS) }
+            }
     }
 
     fun announce(message: String) {
@@ -193,6 +219,10 @@ fun RecorderScreen(onBack: () -> Unit) {
                 quietColor = MaterialTheme.colorScheme.outlineVariant,
                 modifier = Modifier.fillMaxWidth().height(160.dp),
             )
+            if (mode == TranscribeMode.LIVE) {
+                Spacer(Modifier.height(16.dp))
+                LiveTranscript(liveTranscript)
+            }
             Spacer(Modifier.height(40.dp))
 
             if (recording == null) {
@@ -239,9 +269,37 @@ fun RecorderScreen(onBack: () -> Unit) {
                             Icon(painterResource(R.drawable.ic_note), contentDescription = null)
                         }
                     }
+                    LabelledButton(stringResource(R.string.take_photo)) {
+                        FilledTonalIconButton(onClick = { cameraOpen = true }) {
+                            Icon(painterResource(R.drawable.ic_camera), contentDescription = null)
+                        }
+                    }
                 }
             }
         }
+    }
+
+    val recordingId = recording?.recordingId
+    if (cameraOpen && recordingId != null) {
+        CameraSheet(
+            photoFile = {
+                context.withEngine { engine -> File(context.filesDir, engine.photoDir(recordingId)) }
+                    .resolve(newPhotoName())
+            },
+            onCaptured = { file, timestampMs ->
+                scope.launch {
+                    val added = attempt({ announce(context.getString(R.string.error_generic, it)) }) {
+                        context.withEngine { engine ->
+                            val relative = engine.photoDir(recordingId) + "/" + file.name
+                            engine.addPhoto(recordingId, relative, timestampMs)
+                        }
+                    } ?: return@launch
+                    announce(context.getString(R.string.photo_added, formatDuration(added.timestampMs)))
+                }
+            },
+            onError = ::announce,
+            onDismiss = { cameraOpen = false },
+        )
     }
 
     noteAtMs?.let { timestampMs ->
@@ -255,6 +313,37 @@ fun RecorderScreen(onBack: () -> Unit) {
                 bookmark(timestampMs, note, R.string.note_added)
             },
         )
+    }
+}
+
+/** The newest live transcript lines, newest at the bottom. */
+@Composable
+private fun LiveTranscript(segments: List<TranscriptSegment>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (segments.isEmpty()) {
+                Text(
+                    stringResource(R.string.live_transcript_waiting),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            segments.forEach { segment ->
+                Text(segment.text, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                segment.translation?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
     }
 }
 

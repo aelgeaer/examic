@@ -1,5 +1,5 @@
 //! A capture session: PCM goes in on the caller's audio thread, an encoded
-//! and (through the sink) encrypted file comes out on a worker thread.
+//! file comes out on a worker thread.
 //!
 //! The audio thread only copies samples into a lock-free ring buffer. Encoding,
 //! voice activity detection and disk writes happen on the worker, so a slow
@@ -48,6 +48,20 @@ pub trait AudioSink: Write + Send + 'static {
     fn checkpoint(&mut self) -> io::Result<()>;
     /// Seals the stream after the last byte has been written.
     fn finalize(self) -> io::Result<()>;
+}
+
+/// Receives speech as it is detected, on the capture worker thread.
+///
+/// Used for live transcription. Calls must return quickly: they run between
+/// encoding one frame and the next, so anything slow belongs on another
+/// thread. The listener is dropped when the session ends, after its last call.
+pub trait SpeechListener: Send + 'static {
+    /// The recording's audio at 16 kHz in `-1.0..1.0`, in order from the
+    /// start of the recording. `speech_open` says whether the detector was
+    /// inside a speech interval when this audio began.
+    fn audio(&mut self, pcm: &[f32], speech_open: bool);
+    /// A speech interval has closed.
+    fn speech(&mut self, interval: SpeechInterval);
 }
 
 /// Live state of a session, readable from any thread without locking.
@@ -148,6 +162,23 @@ impl CaptureSession {
         E: PacketEncoder + 'static,
         S: AudioSink,
     {
+        Self::start_with_listener(input_rate, ring_ms, encoder, sink, vad, None)
+    }
+
+    /// [`start`](Self::start), with a [`SpeechListener`] that is told about
+    /// speech while it is being recorded.
+    pub fn start_with_listener<E, S>(
+        input_rate: u32,
+        ring_ms: u32,
+        encoder: E,
+        sink: S,
+        vad: Box<dyn Vad>,
+        listener: Option<Box<dyn SpeechListener>>,
+    ) -> Result<(PcmInput, CaptureSession), CaptureError>
+    where
+        E: PacketEncoder + 'static,
+        S: AudioSink,
+    {
         let decimator = Decimator::for_rates(input_rate, VAD_SAMPLE_RATE)
             .ok_or(CaptureError::UnsupportedRate(input_rate))?;
         if encoder.sample_rate() != input_rate {
@@ -180,6 +211,7 @@ impl CaptureSession {
             writer: Some(writer),
             decimator,
             vad,
+            listener,
             segmenter: SpeechSegmenter::new(SegmenterConfig::default()),
             vad_input: Vec::with_capacity(VAD_FRAME_SAMPLES * 2),
             vad_frames: 0,
@@ -234,6 +266,7 @@ struct Worker<E: PacketEncoder, S: AudioSink> {
     writer: Option<OggOpusWriter<S>>,
     decimator: Decimator,
     vad: Box<dyn Vad>,
+    listener: Option<Box<dyn SpeechListener>>,
     segmenter: SpeechSegmenter,
     vad_input: Vec<f32>,
     vad_frames: u64,
@@ -308,8 +341,12 @@ impl<E: PacketEncoder, S: AudioSink> Worker<E, S> {
 
     /// Runs detection over the first `len` samples of the current frame.
     fn run_vad(&mut self, len: usize) {
+        let before = self.vad_input.len();
         self.decimator
             .process(&self.frame[..len], &mut self.vad_input);
+        if let Some(listener) = &mut self.listener {
+            listener.audio(&self.vad_input[before..], self.segmenter.is_open());
+        }
         let mut consumed = 0;
         while self.vad_input.len() - consumed >= VAD_FRAME_SAMPLES {
             let frame = &self.vad_input[consumed..consumed + VAD_FRAME_SAMPLES];
@@ -322,8 +359,12 @@ impl<E: PacketEncoder, S: AudioSink> Worker<E, S> {
             let frame_ms = |n: u64| n * VAD_FRAME_SAMPLES as u64 * 1000 / VAD_SAMPLE_RATE as u64;
             let (start_ms, end_ms) = (frame_ms(self.vad_frames), frame_ms(self.vad_frames + 1));
             self.vad_frames += 1;
-            self.speech
-                .extend(self.segmenter.push(probability, start_ms, end_ms));
+            if let Some(interval) = self.segmenter.push(probability, start_ms, end_ms) {
+                if let Some(listener) = &mut self.listener {
+                    listener.speech(interval);
+                }
+                self.speech.push(interval);
+            }
         }
         self.vad_input.drain(..consumed);
     }
@@ -348,7 +389,14 @@ impl<E: PacketEncoder, S: AudioSink> Worker<E, S> {
         }
 
         let duration_ms = self.samples * 1000 / self.input_rate as u64;
-        self.speech.extend(self.segmenter.finish(duration_ms));
+        if let Some(interval) = self.segmenter.finish(duration_ms) {
+            if let Some(listener) = &mut self.listener {
+                listener.speech(interval);
+            }
+            self.speech.push(interval);
+        }
+        // Dropping the listener tells it the recording is over.
+        self.listener = None;
 
         let writer = self.writer.take().expect("no write has failed");
         writer.finish(self.samples * self.to_48k)?.finalize()?;
@@ -547,6 +595,70 @@ mod tests {
         let interval = report.speech[0];
         assert!((800..=1000).contains(&interval.start_ms), "{interval:?}");
         assert!((2000..=2250).contains(&interval.end_ms), "{interval:?}");
+    }
+
+    #[derive(Default)]
+    struct Heard {
+        samples: usize,
+        open_samples: usize,
+        intervals: Vec<SpeechInterval>,
+        dropped: bool,
+    }
+
+    struct Recorder(Arc<Mutex<Heard>>);
+
+    impl SpeechListener for Recorder {
+        fn audio(&mut self, pcm: &[f32], speech_open: bool) {
+            let mut heard = self.0.lock().unwrap();
+            heard.samples += pcm.len();
+            if speech_open {
+                heard.open_samples += pcm.len();
+            }
+        }
+        fn speech(&mut self, interval: SpeechInterval) {
+            self.0.lock().unwrap().intervals.push(interval);
+        }
+    }
+
+    impl Drop for Recorder {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().dropped = true;
+        }
+    }
+
+    #[test]
+    fn a_listener_hears_all_audio_at_16_khz_and_every_interval() {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let (mut input, session) = CaptureSession::start_with_listener(
+            RATE,
+            DEFAULT_RING_MS,
+            FakeEncoder,
+            TestSink::new(usize::MAX),
+            Box::new(EnergyVad::new()),
+            Some(Box::new(Recorder(heard.clone()))),
+        )
+        .unwrap();
+        let mut noise = Noise(5);
+        // Room noise, voice from 1 s to 2 s, then voice from 2.5 s to the end:
+        // the last interval is still open when recording stops.
+        let pcm: Vec<i16> = (0..3 * RATE as usize)
+            .map(|i| {
+                let t = i as f32 / RATE as f32;
+                let voiced = (1.0..2.0).contains(&t) || t >= 2.5;
+                let v = if voiced { voice(i / 3, -20.0) } else { 0.0 };
+                ((noise.next(-55.0) + v) * 32767.0) as i16
+            })
+            .collect();
+        feed(&mut input, &pcm);
+        let report = session.stop().unwrap();
+
+        let heard = heard.lock().unwrap();
+        assert!(heard.dropped);
+        assert_eq!(heard.samples, 3 * 16_000);
+        assert!(heard.open_samples > 16_000 && heard.open_samples < 3 * 16_000);
+        assert_eq!(heard.intervals, report.speech);
+        assert_eq!(heard.intervals.len(), 2, "{:?}", heard.intervals);
+        assert_eq!(heard.intervals[1].end_ms, 3_000);
     }
 
     #[test]
